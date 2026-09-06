@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0"
+     xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title>Noticias de Viscofan</title>
+    <link>https://www.viscofan.com/es/noticias/noticias</link>
+    <description>Noticias, resultados financieros y comunicaciones corporativas del Grupo Viscofan.</description>
+    <language>es-ES</language>
+    <ttl>360</ttl>
+    <atom:link href="https://raw.githubusercontent.com/plis2100/viscofan-noticias-rss/main/rss.xml"
+               rel="self"
+               type="application/rss+xml"/>
+  </channel>
+</rss>

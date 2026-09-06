@@ -14,11 +14,16 @@ import requests
 from bs4 import BeautifulSoup
 
 
-URL_PRINCIPAL = "https://www.viscofan.com/es/noticias/noticias"
-URL_ALTERNATIVA = "https://www.viscofan.com/es/noticias"
+URL_ES = "https://www.viscofan.com/es/noticias/noticias"
+URL_EN = "https://www.viscofan.com/news/news"
 DOMINIO = "https://www.viscofan.com"
-ARCHIVO_RSS = Path("rss.xml")
 
+URL_RSS = (
+    "https://raw.githubusercontent.com/"
+    "plis2100/viscofan-noticias-rss/main/rss.xml"
+)
+
+ARCHIVO_RSS = Path("rss.xml")
 PRIMER_ANIO = 2014
 MAXIMO_NOTICIAS = 3000
 
@@ -30,11 +35,10 @@ CABECERAS = {
     ),
     "Accept": (
         "text/html,application/xhtml+xml,application/xml;"
-        "q=0.9,image/avif,image/webp,*/*;q=0.8"
+        "q=0.9,*/*;q=0.8"
     ),
-    "Accept-Language": "es-ES,es;q=0.9,en;q=0.6",
+    "Accept-Language": "es-ES,es;q=0.9,en;q=0.7",
     "Cache-Control": "no-cache",
-    "Connection": "keep-alive",
 }
 
 MESES = {
@@ -51,16 +55,22 @@ MESES = {
     "octubre": 10,
     "noviembre": 11,
     "diciembre": 12,
+    "january": 1,
+    "february": 2,
+    "march": 3,
+    "april": 4,
+    "may": 5,
+    "june": 6,
+    "july": 7,
+    "august": 8,
+    "september": 9,
+    "october": 10,
+    "november": 11,
+    "december": 12,
 }
 
 
 def ejecucion_permitida():
-    """
-    Las ejecuciones manuales siempre funcionan.
-
-    Las programadas solo generan el RSS de lunes a viernes
-    a las 07:00, 13:00 y 19:00 de España.
-    """
     if os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch":
         print("Ejecución manual: se ignora el horario.")
         return True
@@ -68,7 +78,7 @@ def ejecucion_permitida():
     ahora = datetime.now(ZoneInfo("Europe/Madrid"))
 
     print(
-        "Hora peninsular española:",
+        "Hora de España:",
         ahora.strftime("%d/%m/%Y %H:%M:%S %Z"),
     )
 
@@ -77,10 +87,7 @@ def ejecucion_permitida():
         return False
 
     if ahora.hour not in {7, 13, 19}:
-        print(
-            "No corresponde ejecutar ahora. "
-            "Horarios: 07:00, 13:00 y 19:00."
-        )
+        print("Solo se ejecuta a las 07:00, 13:00 y 19:00.")
         return False
 
     return True
@@ -90,11 +97,10 @@ def limpiar_texto(texto):
     if not texto:
         return ""
 
-    return re.sub(
-        r"\s+",
-        " ",
-        html.unescape(str(texto)),
-    ).strip()
+    texto = html.unescape(str(texto))
+    texto = re.sub(r"\s+", " ", texto)
+
+    return texto.strip()
 
 
 def limpiar_url(url):
@@ -111,14 +117,29 @@ def limpiar_url(url):
     )
 
 
-def descargar(session, url):
+def url_jina(url):
+    """
+    Jina Reader permite leer la página cuando el servidor
+    de Viscofan rechaza directamente la IP de GitHub.
+    """
+    if url.startswith("https://"):
+        destino = "http://" + url[len("https://"):]
+    elif url.startswith("http://"):
+        destino = url
+    else:
+        destino = "http://" + url
+
+    return "https://r.jina.ai/" + destino
+
+
+def descargar_directamente(session, url):
     ultimo_error = None
 
-    for intento in range(1, 5):
+    for intento in range(1, 3):
         try:
             respuesta = session.get(
                 url,
-                timeout=45,
+                timeout=35,
                 allow_redirects=True,
             )
             respuesta.raise_for_status()
@@ -127,28 +148,106 @@ def descargar(session, url):
                 respuesta.apparent_encoding or "utf-8"
             )
 
+            if len(respuesta.text) < 300:
+                raise RuntimeError(
+                    "La respuesta recibida es demasiado corta."
+                )
+
             print(
-                f"Descargada: {url} "
+                f"Descarga directa correcta: {url} "
                 f"({len(respuesta.content)} bytes)"
             )
 
-            return respuesta.text
+            return {
+                "contenido": respuesta.text,
+                "formato": "html",
+                "url_origen": url,
+            }
 
-        except requests.RequestException as error:
+        except Exception as error:
             ultimo_error = error
 
             print(
-                f"Intento {intento}/4 fallido para "
+                f"Acceso directo {intento}/2 fallido: "
                 f"{url}: {error}",
                 file=sys.stderr,
             )
 
-            if intento < 4:
-                time.sleep(intento * 3)
+            time.sleep(intento)
 
-    raise RuntimeError(
-        f"No se pudo descargar {url}: {ultimo_error}"
-    )
+    raise RuntimeError(str(ultimo_error))
+
+
+def descargar_con_lector(session, url):
+    lector = url_jina(url)
+    ultimo_error = None
+
+    for intento in range(1, 4):
+        try:
+            respuesta = session.get(
+                lector,
+                timeout=60,
+                allow_redirects=True,
+                headers={
+                    "User-Agent": CABECERAS["User-Agent"],
+                    "Accept": "text/plain,text/markdown,*/*",
+                },
+            )
+            respuesta.raise_for_status()
+            respuesta.encoding = "utf-8"
+
+            contenido = respuesta.text.strip()
+
+            if len(contenido) < 200:
+                raise RuntimeError(
+                    "El lector devolvió una respuesta vacía."
+                )
+
+            print(
+                f"Acceso alternativo correcto: {url} "
+                f"({len(contenido)} caracteres)"
+            )
+
+            return {
+                "contenido": contenido,
+                "formato": "markdown",
+                "url_origen": url,
+            }
+
+        except Exception as error:
+            ultimo_error = error
+
+            print(
+                f"Acceso alternativo {intento}/3 fallido: "
+                f"{url}: {error}",
+                file=sys.stderr,
+            )
+
+            if intento < 3:
+                time.sleep(intento * 2)
+
+    raise RuntimeError(str(ultimo_error))
+
+
+def descargar(session, url):
+    try:
+        return descargar_directamente(session, url)
+
+    except Exception as error_directo:
+        print(
+            f"Viscofan bloqueó el acceso directo a {url}: "
+            f"{error_directo}",
+            file=sys.stderr,
+        )
+
+    try:
+        return descargar_con_lector(session, url)
+
+    except Exception as error_alternativo:
+        raise RuntimeError(
+            f"Fallaron el acceso directo y el alternativo: "
+            f"{error_alternativo}"
+        )
 
 
 def convertir_fecha(dia, mes, anio):
@@ -183,137 +282,322 @@ def extraer_fecha(texto):
             coincidencia.group(3),
         )
 
+    nombres_meses = "|".join(
+        sorted(MESES.keys(), key=len, reverse=True)
+    )
+
     coincidencia = re.search(
-        r"\b([0-3]?\d)\s*(?:/|\s+de\s+|\s+)"
-        r"(enero|febrero|marzo|abril|mayo|junio|julio|"
-        r"agosto|septiembre|setiembre|octubre|noviembre|diciembre)"
-        r"\s*(?:/|\s+de\s+|\s+)"
-        r"((?:19|20)\d{2})\b",
+        rf"\b([0-3]?\d)\s*(?:/|\s+de\s+|\s+)"
+        rf"({nombres_meses})"
+        rf"\s*(?:/|\s+de\s+|\s+)"
+        rf"((?:19|20)\d{{2}})\b",
         texto,
+        flags=re.IGNORECASE,
     )
 
     if coincidencia:
         return convertir_fecha(
             coincidencia.group(1),
-            MESES[coincidencia.group(2)],
+            MESES[coincidencia.group(2).lower()],
+            coincidencia.group(3),
+        )
+
+    coincidencia = re.search(
+        rf"\b({nombres_meses})\s+([0-3]?\d),?\s+"
+        rf"((?:19|20)\d{{2}})\b",
+        texto,
+        flags=re.IGNORECASE,
+    )
+
+    if coincidencia:
+        return convertir_fecha(
+            coincidencia.group(2),
+            MESES[coincidencia.group(1).lower()],
             coincidencia.group(3),
         )
 
     return None
 
 
-def obtener_urls_listados():
+def es_url_noticia(url):
+    ruta = urlsplit(url).path.rstrip("/")
+
+    patrones = [
+        r"^/es/noticias/noticia/\d+$",
+        r"^/news/new/\d+$",
+    ]
+
+    return any(
+        re.match(patron, ruta, flags=re.IGNORECASE)
+        for patron in patrones
+    )
+
+
+def convertir_a_url_espanola(url):
+    """
+    Si la noticia fue descubierta en la web inglesa,
+    construye su dirección equivalente en español.
+    """
+    coincidencia = re.search(
+        r"/(?:es/noticias/noticia|news/new)/(\d+)",
+        url,
+        flags=re.IGNORECASE,
+    )
+
+    if not coincidencia:
+        return limpiar_url(url)
+
+    identificador = coincidencia.group(1)
+
+    return (
+        f"{DOMINIO}/es/noticias/noticia/"
+        f"{identificador}"
+    )
+
+
+def enlaces_desde_html(contenido, url_base):
+    soup = BeautifulSoup(contenido, "html.parser")
+    encontrados = {}
+
+    for enlace in soup.find_all("a", href=True):
+        url = limpiar_url(
+            urljoin(url_base, enlace.get("href", ""))
+        )
+
+        if not es_url_noticia(url):
+            continue
+
+        url_es = convertir_a_url_espanola(url)
+
+        titulo = limpiar_texto(
+            enlace.get_text(" ", strip=True)
+        )
+
+        if len(titulo) < 8:
+            titulo = limpiar_texto(
+                enlace.get("title")
+                or enlace.get("aria-label")
+                or ""
+            )
+
+        encontrados[url_es] = titulo
+
+    return encontrados
+
+
+def enlaces_desde_markdown(contenido, url_base):
+    encontrados = {}
+
+    patron_enlace = re.compile(
+        r"\[([^\]]*)\]\(([^)\s]+)\)"
+    )
+
+    for titulo, href in patron_enlace.findall(contenido):
+        href = html.unescape(href).strip()
+        url = limpiar_url(urljoin(url_base, href))
+
+        if not es_url_noticia(url):
+            continue
+
+        url_es = convertir_a_url_espanola(url)
+        titulo = limpiar_texto(titulo)
+
+        encontrados[url_es] = titulo
+
+    # También detecta direcciones mostradas sin sintaxis Markdown.
+    patron_url = re.compile(
+        r"https?://(?:www\.)?viscofan\.com/"
+        r"(?:es/noticias/noticia|news/new)/\d+",
+        flags=re.IGNORECASE,
+    )
+
+    for url in patron_url.findall(contenido):
+        url_es = convertir_a_url_espanola(url)
+
+        if url_es not in encontrados:
+            encontrados[url_es] = ""
+
+    # Direcciones relativas que pueda entregar el lector.
+    patron_relativo = re.compile(
+        r"/(?:es/noticias/noticia|news/new)/\d+",
+        flags=re.IGNORECASE,
+    )
+
+    for ruta in patron_relativo.findall(contenido):
+        url = urljoin(url_base, ruta)
+        url_es = convertir_a_url_espanola(url)
+
+        if url_es not in encontrados:
+            encontrados[url_es] = ""
+
+    return encontrados
+
+
+def obtener_listados():
     anio_actual = datetime.now(
         ZoneInfo("Europe/Madrid")
     ).year
 
-    urls = [
-        URL_PRINCIPAL,
-        URL_ALTERNATIVA,
+    listados = [
+        URL_ES,
+        "https://www.viscofan.com/es/noticias",
+        URL_EN,
+        "https://www.viscofan.com/news",
     ]
 
-    # Viscofan organiza el archivo mediante direcciones anuales:
-    # /es/noticias/noticias/2026
     for anio in range(anio_actual, PRIMER_ANIO - 1, -1):
-        urls.append(
-            f"{URL_PRINCIPAL}/{anio}"
+        listados.extend(
+            [
+                f"{URL_ES}/{anio}",
+                f"{URL_EN}/{anio}",
+            ]
         )
 
-    return urls
-
-
-def es_enlace_noticia(url):
-    partes = urlsplit(url)
-
-    if partes.netloc not in {
-        "www.viscofan.com",
-        "viscofan.com",
-    }:
-        return False
-
-    return bool(
-        re.search(
-            r"/es/noticias/noticia/\d+$",
-            partes.path.rstrip("/"),
-            flags=re.IGNORECASE,
-        )
-    )
+    return listados
 
 
 def localizar_noticias(session):
     encontradas = {}
-    paginas_descargadas = 0
+    listados_correctos = 0
+    fallos_consecutivos_es = 0
+    fallos_consecutivos_en = 0
 
-    for url_listado in obtener_urls_listados():
+    for url_listado in obtener_listados():
         try:
-            contenido = descargar(
+            resultado = descargar(
                 session,
                 url_listado,
             )
-            paginas_descargadas += 1
+            listados_correctos += 1
+
+            if "/es/" in url_listado:
+                fallos_consecutivos_es = 0
+            else:
+                fallos_consecutivos_en = 0
 
         except Exception as error:
             print(
-                f"AVISO: no se pudo descargar el listado "
+                f"AVISO: listado no disponible: "
                 f"{url_listado}: {error}",
                 file=sys.stderr,
             )
+
+            if "/es/" in url_listado:
+                fallos_consecutivos_es += 1
+            else:
+                fallos_consecutivos_en += 1
+
             continue
 
-        soup = BeautifulSoup(
-            contenido,
-            "html.parser",
-        )
-
-        contador = 0
-
-        for enlace in soup.find_all("a", href=True):
-            href = enlace.get("href", "").strip()
-
-            if not href:
-                continue
-
-            url = limpiar_url(
-                urljoin(url_listado, href)
+        if resultado["formato"] == "html":
+            enlaces = enlaces_desde_html(
+                resultado["contenido"],
+                url_listado,
+            )
+        else:
+            enlaces = enlaces_desde_markdown(
+                resultado["contenido"],
+                url_listado,
             )
 
-            if not es_enlace_noticia(url):
-                continue
+        nuevos = 0
 
-            titulo = limpiar_texto(
-                enlace.get_text(" ", strip=True)
-            )
-
-            if len(titulo) < 8:
-                titulo = limpiar_texto(
-                    enlace.get("title")
-                    or enlace.get("aria-label")
-                    or ""
-                )
-
+        for url, titulo in enlaces.items():
             if url not in encontradas:
                 encontradas[url] = titulo
-                contador += 1
+                nuevos += 1
 
             elif len(titulo) > len(encontradas[url]):
                 encontradas[url] = titulo
 
         print(
-            f"Listado {url_listado}: "
-            f"{contador} enlaces nuevos."
+            f"Listado procesado: {url_listado}. "
+            f"Nuevos enlaces: {nuevos}"
         )
 
-        time.sleep(0.25)
+        time.sleep(0.2)
 
     print(
         f"Listados descargados correctamente: "
-        f"{paginas_descargadas}"
+        f"{listados_correctos}"
     )
 
     return encontradas
 
 
-def buscar_fecha_detalle(soup):
+def titulo_desde_html(soup, titulo_listado, url):
+    titulo = ""
+
+    elemento = soup.select_one(
+        "main h1, article h1, "
+        ".news-detail h1, .noticia h1, h1"
+    )
+
+    if elemento:
+        titulo = limpiar_texto(
+            elemento.get_text(" ", strip=True)
+        )
+
+    if not titulo:
+        meta = soup.select_one(
+            "meta[property='og:title']"
+        )
+
+        if meta:
+            titulo = limpiar_texto(
+                meta.get("content", "")
+            )
+
+    if not titulo:
+        titulo = limpiar_texto(titulo_listado)
+
+    if not titulo:
+        numero = url.rstrip("/").split("/")[-1]
+        titulo = f"Noticia de Viscofan {numero}"
+
+    titulo = re.sub(
+        r"\s*[|–-]\s*Viscofan.*$",
+        "",
+        titulo,
+        flags=re.IGNORECASE,
+    )
+
+    return titulo.strip()
+
+
+def titulo_desde_markdown(contenido, titulo_listado, url):
+    patrones = [
+        r"(?m)^#\s+(.+)$",
+        r"(?m)^Title:\s*(.+)$",
+    ]
+
+    for patron in patrones:
+        coincidencia = re.search(patron, contenido)
+
+        if coincidencia:
+            titulo = limpiar_texto(
+                coincidencia.group(1)
+            )
+
+            titulo = re.sub(
+                r"\s*[|–-]\s*Viscofan.*$",
+                "",
+                titulo,
+                flags=re.IGNORECASE,
+            ).strip()
+
+            if len(titulo) >= 8:
+                return titulo
+
+    if titulo_listado:
+        return limpiar_texto(titulo_listado)
+
+    numero = url.rstrip("/").split("/")[-1]
+
+    return f"Noticia de Viscofan {numero}"
+
+
+def fecha_desde_html(soup):
     selectores = [
         "meta[property='article:published_time']",
         "meta[name='date']",
@@ -355,91 +639,20 @@ def buscar_fecha_detalle(soup):
             if fecha:
                 return fecha
 
-    for selector in [
-        "main time",
-        "article time",
-        ".fecha",
-        ".date",
-        ".news-date",
-        ".noticia-fecha",
-    ]:
-        for elemento in soup.select(selector):
-            fecha = extraer_fecha(
-                elemento.get_text(" ", strip=True)
-            )
-
-            if fecha:
-                return fecha
-
     return extraer_fecha(
         soup.get_text(" ", strip=True)
     )
 
 
-def extraer_titulo(soup, titulo_listado, url):
-    titulo = ""
-
-    elemento = soup.select_one(
-        "main h1, article h1, .noticia h1, h1"
+def descripcion_desde_html(soup):
+    contenedor = (
+        soup.select_one(
+            "main article, article, .news-detail, "
+            ".noticia, .detalle-noticia, main"
+        )
+        or soup.body
+        or soup
     )
-
-    if elemento:
-        titulo = limpiar_texto(
-            elemento.get_text(" ", strip=True)
-        )
-
-    if not titulo:
-        meta = soup.select_one(
-            "meta[property='og:title']"
-        )
-
-        if meta:
-            titulo = limpiar_texto(
-                meta.get("content", "")
-            )
-
-    if not titulo:
-        titulo = limpiar_texto(titulo_listado)
-
-    if not titulo:
-        identificador = (
-            urlsplit(url).path.rstrip("/").split("/")[-1]
-        )
-        titulo = f"Noticia de Viscofan {identificador}"
-
-    titulo = re.sub(
-        r"\s*[|–-]\s*Viscofan.*$",
-        "",
-        titulo,
-        flags=re.IGNORECASE,
-    ).strip()
-
-    return titulo
-
-
-def obtener_contenedor(soup):
-    selectores = [
-        "main article",
-        "article",
-        ".news-detail",
-        ".noticia",
-        ".detalle-noticia",
-        ".contenido-noticia",
-        ".content",
-        "main",
-    ]
-
-    for selector in selectores:
-        contenedor = soup.select_one(selector)
-
-        if contenedor:
-            return contenedor
-
-    return soup.body or soup
-
-
-def extraer_descripcion(soup):
-    contenedor = obtener_contenedor(soup)
 
     for elemento in contenedor.select(
         "script, style, nav, form, button, "
@@ -458,22 +671,6 @@ def extraer_descripcion(soup):
         )
 
         if len(texto) < 25:
-            continue
-
-        minusculas = texto.lower()
-
-        exclusiones = (
-            "política de privacidad",
-            "política de cookies",
-            "todos los derechos reservados",
-            "seleccione un año",
-            "aviso legal",
-        )
-
-        if any(
-            excluido in minusculas
-            for excluido in exclusiones
-        ):
             continue
 
         if texto in fragmentos:
@@ -498,6 +695,32 @@ def extraer_descripcion(soup):
                 meta.get("content", "")
             )
 
+    return limitar_descripcion(descripcion)
+
+
+def descripcion_desde_markdown(contenido, titulo):
+    texto = contenido
+
+    texto = re.sub(
+        r"(?m)^(Title|URL Source|Published Time|Markdown Content):.*$",
+        "",
+        texto,
+    )
+    texto = re.sub(r"!\[[^\]]*]\([^)]+\)", "", texto)
+    texto = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", texto)
+    texto = re.sub(r"(?m)^#{1,6}\s*", "", texto)
+    texto = re.sub(r"[*_`>|]+", " ", texto)
+    texto = limpiar_texto(texto)
+
+    if titulo and texto.startswith(titulo):
+        texto = texto[len(titulo):].strip(" :-")
+
+    return limitar_descripcion(texto)
+
+
+def limitar_descripcion(descripcion):
+    descripcion = limpiar_texto(descripcion)
+
     if len(descripcion) > 3000:
         descripcion = (
             descripcion[:2997].rsplit(" ", 1)[0]
@@ -507,7 +730,7 @@ def extraer_descripcion(soup):
     return descripcion or "Noticia publicada por Viscofan."
 
 
-def extraer_imagen(soup, url):
+def imagen_desde_html(soup, url):
     for selector in [
         "meta[property='og:image']",
         "meta[name='twitter:image']",
@@ -523,19 +746,10 @@ def extraer_imagen(soup, url):
             if imagen.startswith("http"):
                 return imagen
 
-    contenedor = obtener_contenedor(soup)
-    imagen = contenedor.find("img", src=True)
-
-    if imagen:
-        return urljoin(
-            url,
-            imagen.get("src", ""),
-        )
-
     return ""
 
 
-def extraer_documentos(soup, url):
+def documentos_desde_html(soup, url):
     documentos = []
     vistos = set()
 
@@ -544,22 +758,12 @@ def extraer_documentos(soup, url):
             url,
             enlace.get("href", "").strip(),
         )
-        texto = limpiar_texto(
-            enlace.get_text(" ", strip=True)
-        )
 
-        es_documento = re.search(
+        if not re.search(
             r"\.(pdf|doc|docx|xls|xlsx|zip)(?:$|\?)",
             absoluta,
             flags=re.IGNORECASE,
-        )
-
-        es_descarga = (
-            "descargar" in texto.lower()
-            or "download" in texto.lower()
-        )
-
-        if not es_documento and not es_descarga:
+        ):
             continue
 
         if absoluta in vistos:
@@ -567,8 +771,9 @@ def extraer_documentos(soup, url):
 
         vistos.add(absoluta)
 
-        if not texto:
-            texto = "Descargar documento"
+        texto = limpiar_texto(
+            enlace.get_text(" ", strip=True)
+        ) or "Descargar documento"
 
         documentos.append(
             f'<a href="{html.escape(absoluta, quote=True)}">'
@@ -578,27 +783,69 @@ def extraer_documentos(soup, url):
     return documentos
 
 
+def intentar_detalle(session, url_es):
+    identificador = url_es.rstrip("/").split("/")[-1]
+
+    candidatos = [
+        url_es,
+        f"{DOMINIO}/news/new/{identificador}",
+    ]
+
+    errores = []
+
+    for candidato in candidatos:
+        try:
+            return descargar(session, candidato)
+
+        except Exception as error:
+            errores.append(
+                f"{candidato}: {error}"
+            )
+
+    raise RuntimeError(" | ".join(errores))
+
+
 def procesar_noticia(session, url, titulo_listado):
     try:
-        contenido = descargar(session, url)
-        soup = BeautifulSoup(
-            contenido,
-            "html.parser",
-        )
+        resultado = intentar_detalle(session, url)
+        contenido = resultado["contenido"]
 
-        titulo = extraer_titulo(
-            soup,
-            titulo_listado,
-            url,
-        )
-        fecha = buscar_fecha_detalle(soup)
-        descripcion = extraer_descripcion(soup)
-        imagen = extraer_imagen(soup, url)
-        documentos = extraer_documentos(soup, url)
+        if resultado["formato"] == "html":
+            soup = BeautifulSoup(
+                contenido,
+                "html.parser",
+            )
+
+            titulo = titulo_desde_html(
+                soup,
+                titulo_listado,
+                url,
+            )
+            fecha = fecha_desde_html(soup)
+            descripcion = descripcion_desde_html(soup)
+            imagen = imagen_desde_html(soup, url)
+            documentos = documentos_desde_html(
+                soup,
+                url,
+            )
+
+        else:
+            titulo = titulo_desde_markdown(
+                contenido,
+                titulo_listado,
+                url,
+            )
+            fecha = extraer_fecha(contenido)
+            descripcion = descripcion_desde_markdown(
+                contenido,
+                titulo,
+            )
+            imagen = ""
+            documentos = []
 
         if not fecha:
             print(
-                f"AVISO: no se encontró la fecha: {url}",
+                f"AVISO: noticia sin fecha: {url}",
                 file=sys.stderr,
             )
             return None
@@ -625,7 +872,7 @@ def procesar_noticia(session, url, titulo_listado):
 
         return {
             "titulo": titulo,
-            "url": limpiar_url(url),
+            "url": url,
             "fecha": fecha,
             "descripcion": descripcion_html,
             "imagen": imagen,
@@ -633,7 +880,7 @@ def procesar_noticia(session, url, titulo_listado):
 
     except Exception as error:
         print(
-            f"AVISO: no se pudo procesar {url}: {error}",
+            f"AVISO: no se procesó {url}: {error}",
             file=sys.stderr,
         )
         return None
@@ -657,7 +904,7 @@ def leer_rss_anterior():
                 item.findtext("title", "")
             )
             url = limpiar_url(
-                item.findtext("link", "").strip()
+                item.findtext("link", "")
             )
             descripcion = item.findtext(
                 "description",
@@ -705,9 +952,9 @@ def leer_rss_anterior():
                 "imagen": imagen,
             }
 
-    except (ET.ParseError, OSError) as error:
+    except Exception as error:
         print(
-            f"AVISO: no se pudo leer el RSS anterior: {error}",
+            f"AVISO: RSS anterior no válido: {error}",
             file=sys.stderr,
         )
 
@@ -729,28 +976,22 @@ def escribir_rss(noticias):
     ET.SubElement(canal, "title").text = (
         "Noticias de Viscofan"
     )
-    ET.SubElement(canal, "link").text = (
-        URL_PRINCIPAL
-    )
+    ET.SubElement(canal, "link").text = URL_ES
     ET.SubElement(canal, "description").text = (
-        "Noticias, resultados financieros y comunicaciones "
-        "corporativas del Grupo Viscofan."
+        "Noticias, resultados y comunicaciones "
+        "corporativas de Viscofan."
     )
     ET.SubElement(canal, "language").text = "es-ES"
+    ET.SubElement(canal, "ttl").text = "360"
     ET.SubElement(canal, "lastBuildDate").text = (
         format_datetime(datetime.now(timezone.utc))
     )
-    ET.SubElement(canal, "ttl").text = "360"
 
     atom = ET.SubElement(
         canal,
         "{http://www.w3.org/2005/Atom}link",
     )
-    atom.set(
-        "href",
-        "https://raw.githubusercontent.com/"
-        "plis2100/viscofan-noticias-rss/main/rss.xml",
-    )
+    atom.set("href", URL_RSS)
     atom.set("rel", "self")
     atom.set("type", "application/rss+xml")
 
@@ -831,7 +1072,7 @@ def main():
         if noticia:
             nuevas[noticia["url"]] = noticia
 
-        time.sleep(0.25)
+        time.sleep(0.2)
 
     anteriores = leer_rss_anterior()
 
@@ -850,14 +1091,13 @@ def main():
         f"{len(anteriores)}"
     )
     print(
-        f"Total de noticias en el RSS: "
-        f"{len(ordenadas)}"
+        f"Total de noticias en el RSS: {len(ordenadas)}"
     )
 
     if not ordenadas:
         raise RuntimeError(
-            "Viscofan no devolvió ninguna noticia y "
-            "tampoco existe un RSS anterior."
+            "No fue posible recuperar noticias de Viscofan "
+            "por acceso directo ni alternativo."
         )
 
     escribir_rss(ordenadas)
